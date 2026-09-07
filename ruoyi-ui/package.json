@@ -39,6 +39,7 @@
     "path-browserify": "1.0.1",
     "screenfull": "5.0.2",
     "sortablejs": "1.10.2",
+    "three": "0.185.1",
     "vue": "2.7.16",
     "vue-cropper": "0.5.5",
     "vue-router": "3.6.5",

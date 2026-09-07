@@ -375,7 +375,7 @@ public class MatFileReceiverService implements SmartLifecycle
         PhmDiagnosisBindingEntity binding = bindings.get(0);
         if (!device.getId().equals(binding.getDeviceId())
             || !device.getDeviceCode().equals(binding.getDeviceCode())
-            || !header.getChannelId().equals(binding.getChannelId()))
+            || !Long.valueOf(header.getChannelId()).equals(binding.getChannelId()))
         {
             throw new IllegalArgumentException("诊断模型绑定与设备、测点或物理通道不一致");
         }

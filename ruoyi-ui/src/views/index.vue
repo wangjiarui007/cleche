@@ -20,6 +20,13 @@
       <article><span>数据延迟</span><strong>{{ delayText }}</strong><small>最后采样至今</small></article>
     </section>
 
+    <device-model-viewer
+      :devices="sortedDevices"
+      :selected-code.sync="selectedDeviceCode"
+      :can-open-monitoring="hasPermission('sensor:monitoring:view')"
+      @open-monitoring="openDevice"
+    />
+
     <section class="home-panel device-overview-panel">
       <div class="panel-head device-overview-head">
         <div><strong>设备状态总览</strong><span>按告警优先级排列，共 {{ summary.totalDevices || devices.length }} 台授权设备</span></div>
@@ -78,14 +85,17 @@
 
 <script>
 import { mapState } from 'vuex'
+import DeviceModelViewer from '@/components/DeviceModelViewer'
 
 export default {
   name: 'Index',
+  components: { DeviceModelViewer },
   data() {
     return {
       overviewLoading: false,
       overviewError: '',
       showAllDevices: false,
+      selectedDeviceCode: '',
       workflows: [
         { path: '/monitoring-center/index', permission: 'sensor:monitoring:view', icon: 'el-icon-data-line', title: '实时监测', description: '查看设备、测点和最新采样质量' },
         { path: '/monitoring-center/vibration', permission: 'sensor:vibration:list', icon: 'el-icon-pie-chart', title: '振动分析', description: '查看趋势、波形、频谱和文件数据' },
@@ -124,6 +134,20 @@ export default {
       const value = this.summary.dataDelaySeconds
       if (value === null || value === undefined) return '--'
       return Number(value) < 60 ? `${value} 秒` : `${Math.floor(value / 60)} 分钟`
+    }
+  },
+  watch: {
+    sortedDevices: {
+      immediate: true,
+      handler(devices) {
+        if (!devices.length) {
+          this.selectedDeviceCode = ''
+          return
+        }
+        if (!devices.some(device => device.deviceCode === this.selectedDeviceCode)) {
+          this.selectedDeviceCode = devices[0].deviceCode
+        }
+      }
     }
   },
   async created() {

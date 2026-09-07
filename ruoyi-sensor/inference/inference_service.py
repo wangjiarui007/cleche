@@ -104,9 +104,17 @@ ALLOW_UNVERIFIED_MODELS = os.environ.get(
     "INFERENCE_ALLOW_UNVERIFIED_MODELS", "false"
 ).strip().lower() == "true"
 DATA_DIR = BASE_DIR / "get" / "got"
+# Java 平台（application.yml 中 sensor.attachment.root 默认 ./.local-data/attachments）
+# 将受信附件存放到 <项目根>/.local-data/attachments/objects 并向下发 filePath。
+# 缺省可信根同时包含 DATA_DIR 与该平台附件目录，使 Java 下发的路径无需额外
+# 环境变量即可通过校验；生产环境仍可用 INFERENCE_ALLOWED_INPUT_ROOTS 显式覆盖。
+_PLATFORM_ATTACHMENT_OBJECTS = BASE_DIR.parent.parent / ".local-data" / "attachments" / "objects"
+_DEFAULT_INPUT_ROOTS = os.pathsep.join(
+    str(p) for p in (DATA_DIR, _PLATFORM_ATTACHMENT_OBJECTS)
+)
 ALLOWED_INPUT_ROOTS = tuple(
     Path(value.strip()).expanduser().resolve()
-    for value in os.environ.get("INFERENCE_ALLOWED_INPUT_ROOTS", str(DATA_DIR)).split(os.pathsep)
+    for value in os.environ.get("INFERENCE_ALLOWED_INPUT_ROOTS", _DEFAULT_INPUT_ROOTS).split(os.pathsep)
     if value.strip()
 )
 

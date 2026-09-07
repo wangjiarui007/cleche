@@ -5,6 +5,7 @@ chcp 65001 >nul
 set "PROJECT_ROOT=%~dp0.."
 set "ADMIN_JAR=%PROJECT_ROOT%\ruoyi-admin\target\ruoyi-admin.jar"
 set "SENSOR_ATTACHMENT_ROOT=%PROJECT_ROOT%\.local-data\attachments"
+set "INFERENCE_ALLOWED_INPUT_ROOTS=%PROJECT_ROOT%\.local-data\attachments\objects"
 set "RUOYI_PROFILE=%PROJECT_ROOT%\.local-data\uploadPath"
 set "INFERENCE_MODEL_ROOT=%PROJECT_ROOT%\.local-models"
 set "JAVA_OPTS=-Xms256m -Xmx1024m -XX:MetaspaceSize=128m -XX:MaxMetaspaceSize=512m"
