@@ -87,6 +87,9 @@ export default {
       statusMaterials: [],
       statusRing: null,
       resizeObserver: null,
+      resizeFrameId: null,
+      stageWidth: 0,
+      stageHeight: 0,
       intersectionObserver: null,
       THREE: null,
       destroyed: false
@@ -109,8 +112,10 @@ export default {
   beforeDestroy() {
     this.destroyed = true
     this.stopAnimation()
+    if (this.resizeFrameId) cancelAnimationFrame(this.resizeFrameId)
+    this.resizeFrameId = null
     document.removeEventListener('visibilitychange', this.handleVisibilityChange)
-    window.removeEventListener('resize', this.resize)
+    window.removeEventListener('resize', this.scheduleResize)
     if (this.resizeObserver) this.resizeObserver.disconnect()
     if (this.intersectionObserver) this.intersectionObserver.disconnect()
     if (this.controls) this.controls.dispose()
@@ -242,10 +247,10 @@ export default {
     },
     observeStage() {
       if ('ResizeObserver' in window) {
-        this.resizeObserver = new ResizeObserver(this.resize)
+        this.resizeObserver = new ResizeObserver(this.scheduleResize)
         this.resizeObserver.observe(this['\u0024el'].querySelector('.model-stage'))
       } else {
-        window.addEventListener('resize', this.resize)
+        window.addEventListener('resize', this.scheduleResize)
       }
       if ('IntersectionObserver' in window) {
         this.intersectionObserver = new IntersectionObserver(entries => {
@@ -256,11 +261,22 @@ export default {
         this.intersectionObserver.observe(this['\u0024el'])
       }
     },
+    scheduleResize() {
+      if (this.destroyed || this.resizeFrameId) return
+      this.resizeFrameId = requestAnimationFrame(() => {
+        this.resizeFrameId = null
+        this.resize()
+      })
+    },
     resize() {
       if (!this.renderer || !this.camera) return
       const stage = this['\u0024el'].querySelector('.model-stage')
+      if (!stage) return
       const width = Math.max(stage.clientWidth, 1)
       const height = Math.max(stage.clientHeight, 1)
+      if (width === this.stageWidth && height === this.stageHeight) return
+      this.stageWidth = width
+      this.stageHeight = height
       this.renderer.setSize(width, height, false)
       this.camera.aspect = width / height
       this.camera.updateProjectionMatrix()

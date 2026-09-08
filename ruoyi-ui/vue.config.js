@@ -36,7 +36,11 @@ module.exports = {
       overlay: {
         warnings: false,
         errors: true,
-        runtimeErrors: error => !(error && error.__ruoyiRequestError)
+        runtimeErrors: error => {
+          if (error && error.__ruoyiRequestError) return false
+          const message = typeof error === 'string' ? error : (error && error.message) || ''
+          return !/ResizeObserver loop/i.test(message)
+        }
       }
     },
     proxy: {

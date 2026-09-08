@@ -1,8 +1,19 @@
 const { test, expect } = require('@playwright/test')
+const fs = require('fs')
+const path = require('path')
+
+const envFile = process.env.PLAYWRIGHT_BASE_URL ? '.env.production' : '.env.development'
+const platformTitle = fs.readFileSync(path.join(__dirname, '..', '..', envFile), 'utf8')
+  .split(/\r?\n/)
+  .map(line => line.match(/^\s*VUE_APP_TITLE\s*=\s*(.+?)\s*$/))
+  .filter(Boolean)
+  .pop()[1]
 
 test('login page renders the production platform identity', async ({ page }) => {
   await page.goto('/login')
-  await expect(page.locator('body')).toContainText('振动温度监测平台')
+  await expect(page).toHaveTitle(platformTitle)
+  await expect(page.locator('.brand-title')).toHaveText(platformTitle)
+  await expect(page.locator('.brand-eyebrow')).toHaveText('PHM / CONDITION MONITORING')
   await expect(page.getByPlaceholder('账号')).toBeVisible()
   await expect(page.getByPlaceholder('密码')).toBeVisible()
   await expect(page.getByRole('button', { name: /登\s*录/ })).toBeVisible()
