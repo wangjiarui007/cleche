@@ -12,12 +12,15 @@
     },
     {
       "type": "bearing",
-      "version": "bearing-unregistered",
+      "version": "bearing-v8-unregistered",
       "artifact": "best_model.pth",
-      "sha256": "5773424dba27357bbcf756172b3cb8e19c6eebc1510c29169b7e638b3a6fdc30",
-      "size": 15458955,
+      "sha256": "133e36c213c7a7dd49c47c6a519eb57701574d479159534a307aab518c124d89",
+      "size": 951649,
       "environmentPath": "BEARING_MODEL_PATH",
-      "environmentSha256": "BEARING_MODEL_SHA256"
+      "environmentSha256": "BEARING_MODEL_SHA256",
+      "architecture": "WDCNNV8DG",
+      "classes": ["healthy", "outer_ring", "rolling_element"],
+      "description": "WDCNN v8 bearing fault diagnosis with order spectrum + Hilbert envelope + probability fusion"
     }
   ]
 }

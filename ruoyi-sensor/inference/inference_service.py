@@ -49,6 +49,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 # =============================================================================
 from models.wdcnn_mech_dg2 import WDCNNMechDG
 from models.resnet18_1d import ResNet1D18
+from models.wdcnn_v8_bearing_dg import WDCNNV8DG
+from core.inference_v8 import (
+    build_model_from_checkpoint as v8_build_model,
+    load_checkpoint as v8_load_checkpoint,
+    predict_signal_v8 as v8_predict_signal,
+    apply_rejection_v8 as v8_apply_rejection,
+    decision_config_from_checkpoint as v8_decision_config,
+    rejection_config_from_checkpoint as v8_rejection_config,
+    assess_signal_quality as v8_assess_quality,
+)
 from utils_signal import _extract_signal_from_dict
 from utils.dataset import FileInferenceDataset
 
@@ -100,6 +110,10 @@ BEARING_MODEL_PATH = Path(os.environ.get(
 )).expanduser().resolve()
 GEAR_MODEL_SHA256 = os.environ.get("GEAR_MODEL_SHA256", "").strip().lower()
 BEARING_MODEL_SHA256 = os.environ.get("BEARING_MODEL_SHA256", "").strip().lower()
+BEARING_V8_MODEL_PATH = Path(os.environ.get(
+    "BEARING_V8_MODEL_PATH", str(BASE_DIR / "get" / "best_model.pth")
+)).expanduser().resolve()
+BEARING_V8_MODEL_SHA256 = os.environ.get("BEARING_V8_MODEL_SHA256", "").strip().lower()
 ALLOW_UNVERIFIED_MODELS = os.environ.get(
     "INFERENCE_ALLOW_UNVERIFIED_MODELS", "false"
 ).strip().lower() == "true"
@@ -122,7 +136,8 @@ DEFAULT_PORT = int(os.environ.get("PORT", 5000))
 INFERENCE_BIND_HOST = os.environ.get("INFERENCE_BIND_HOST", "127.0.0.1")
 INTERNAL_TOKEN = os.environ.get("INFERENCE_INTERNAL_TOKEN", "")
 GEAR_MODEL_VERSION = os.environ.get("GEAR_MODEL_VERSION", "gear-unregistered")
-BEARING_MODEL_VERSION = os.environ.get("BEARING_MODEL_VERSION", "bearing-unregistered")
+BEARING_MODEL_VERSION = os.environ.get("BEARING_MODEL_VERSION", "bearing-v8-unregistered")
+BEARING_V8_MODEL_VERSION = os.environ.get("BEARING_V8_MODEL_VERSION", "bearing-v8-unregistered")
 MODEL_ROOT = Path(os.environ.get(
     "INFERENCE_MODEL_ROOT", str(BASE_DIR / "get")
 )).expanduser().resolve()
@@ -190,6 +205,8 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager: startup & shutdown logic (FastAPI modern pattern)."""
     global gear_model, gear_model_params, gear_class_names, gear_classwise_cfg
     global bearing_model, bearing_model_params, bearing_class_names
+    global bearing_v8_model, bearing_v8_params, bearing_v8_class_names
+    global bearing_v8_decision_config, bearing_v8_rejection_config
     global CLASS_FILE_UNK_OVERRIDES, MEAN_MAHA_ACCEPT_OVERRIDES, KNOWN_FAULT_PROTECT_CLASSES
 
     if len(INTERNAL_TOKEN.encode("utf-8")) < 32:
@@ -216,21 +233,42 @@ async def lifespan(app: FastAPI):
         gear_classwise_cfg = {}
 
     if "bearing" in ENABLED_MODELS:
-        logger.info("Loading bearing model from %s", BEARING_MODEL_PATH)
+        # Try V8 first, fall back to ResNet1D18
         try:
-            bearing_model, bearing_model_params, bearing_class_names = load_bearing_model()
+            logger.info("Loading bearing V8 model from %s", BEARING_V8_MODEL_PATH)
+            (bearing_v8_model, bearing_v8_params, bearing_v8_class_names,
+             bearing_v8_decision_config, bearing_v8_rejection_config) = load_bearing_v8_model()
             model_load_errors.pop("bearing", None)
-            logger.info("Bearing model loaded on %s", DEVICE)
+            model_load_errors.pop("bearing_v8", None)
+            logger.info("Bearing V8 model loaded on %s", DEVICE)
         except Exception as exc:
-            bearing_model = None
-            bearing_model_params = {}
-            bearing_class_names = []
-            model_load_errors["bearing"] = str(exc)
-            logger.exception("Bearing model failed to load")
+            bearing_v8_model = None
+            bearing_v8_params = {}
+            bearing_v8_class_names = []
+            bearing_v8_decision_config = {}
+            bearing_v8_rejection_config = {}
+            model_load_errors["bearing_v8"] = str(exc)
+            logger.warning("Bearing V8 model failed to load, trying ResNet1D18 fallback: %s", exc)
+            try:
+                logger.info("Loading bearing ResNet1D18 model from %s", BEARING_MODEL_PATH)
+                bearing_model, bearing_model_params, bearing_class_names = load_bearing_model()
+                model_load_errors.pop("bearing", None)
+                logger.info("Bearing ResNet1D18 model loaded on %s", DEVICE)
+            except Exception as exc2:
+                bearing_model = None
+                bearing_model_params = {}
+                bearing_class_names = []
+                model_load_errors["bearing"] = str(exc2)
+                logger.exception("Bearing ResNet1D18 model also failed to load")
     else:
         bearing_model = None
         bearing_model_params = {}
         bearing_class_names = []
+        bearing_v8_model = None
+        bearing_v8_params = {}
+        bearing_v8_class_names = []
+        bearing_v8_decision_config = {}
+        bearing_v8_rejection_config = {}
 
     CLASS_FILE_UNK_OVERRIDES = v6.parse_class_threshold_overrides(
         "healthy:0.70,single_pitting:0.85,multi_pitting:0.85,single_spalling:0.85"
@@ -299,6 +337,11 @@ gear_classwise_cfg: Dict[str, Any] = {}
 bearing_model: Optional[nn.Module] = None
 bearing_model_params: Dict[str, Any] = {}
 bearing_class_names: List[str] = []
+bearing_v8_model: Optional[WDCNNV8DG] = None
+bearing_v8_params: Dict[str, Any] = {}
+bearing_v8_class_names: List[str] = []
+bearing_v8_decision_config: Dict[str, Any] = {}
+bearing_v8_rejection_config: Dict[str, Any] = {}
 model_load_errors: Dict[str, str] = {}
 CLASS_FILE_UNK_OVERRIDES: Dict[str, float] = {}
 MEAN_MAHA_ACCEPT_OVERRIDES: Dict[str, float] = {}
@@ -593,6 +636,40 @@ def load_bearing_model(
     return model, params, class_names
 
 
+def load_bearing_v8_model(
+    model_path: Path = BEARING_V8_MODEL_PATH,
+    expected_sha256: str = BEARING_V8_MODEL_SHA256,
+) -> Tuple[WDCNNV8DG, Dict[str, Any], List[str], Dict[str, Any], Dict[str, Any]]:
+    """Load WDCNN-V8-DG bearing diagnosis model from checkpoint."""
+    _verify_model_artifact(model_path, expected_sha256, "bearing_v8")
+
+    _register_torch_safe_globals()
+    checkpoint = v8_load_checkpoint(model_path, map_location=DEVICE)
+
+    class_names = list(checkpoint["classes"])
+    params = {
+        "fs": float(checkpoint.get("fs", 16000.0)),
+        "win_len": int(checkpoint.get("win_len", 4096)),
+        "stride": int(checkpoint.get("win_len", 4096)),
+        "feat_dim": int(checkpoint.get("feat_dim", 256)),
+        "num_domains": int(checkpoint.get("num_domains", 2)),
+        "envelope_mode": str(checkpoint.get("envelope_mode", "hilbert")),
+        "signal_key": str(checkpoint.get("signal_key", "DE_time")),
+        "num_classes": len(class_names),
+    }
+    decision_config = v8_decision_config(checkpoint)
+    rejection_config = v8_rejection_config(checkpoint)
+
+    model = v8_build_model(checkpoint, device=DEVICE)
+
+    logger.info(
+        "Bearing V8 model loaded: %d classes %s on %s (win_len=%d, fs=%.0f, envelope=%s)",
+        len(class_names), class_names, DEVICE,
+        params["win_len"], params["fs"], params["envelope_mode"],
+    )
+    return model, params, class_names, decision_config, rejection_config
+
+
 def _resolve_model_artifact(artifact_uri: str) -> Path:
     value = str(artifact_uri or "").strip()
     if not value:
@@ -635,6 +712,18 @@ def _default_model_bundle(model_type: str, requested_version: str) -> Dict[str, 
             "classwise_cfg": gear_classwise_cfg,
             "version": GEAR_MODEL_VERSION,
         }
+    # bearing: prefer V8, fall back to ResNet1D18
+    if bearing_v8_model is not None:
+        version = requested_version or BEARING_V8_MODEL_VERSION
+        return {
+            "model": bearing_v8_model,
+            "params": bearing_v8_params,
+            "classes": bearing_v8_class_names,
+            "decision_config": bearing_v8_decision_config,
+            "rejection_config": bearing_v8_rejection_config,
+            "version": version,
+            "engine": "v8",
+        }
     if requested_version and requested_version != BEARING_MODEL_VERSION:
         raise ValueError(f"Requested bearing model version is not loaded: {requested_version}")
     if bearing_model is None:
@@ -644,6 +733,7 @@ def _default_model_bundle(model_type: str, requested_version: str) -> Dict[str, 
         "params": bearing_model_params,
         "classes": bearing_class_names,
         "version": BEARING_MODEL_VERSION,
+        "engine": "resnet18",
     }
 
 
@@ -676,15 +766,30 @@ def _load_model_bundle(
                 "classes": classes,
                 "classwise_cfg": classwise_cfg,
                 "version": requested_version,
+                "engine": "gear",
             }
         else:
-            model, params, classes = load_bearing_model(artifact_path, expected)
-            bundle = {
-                "model": model,
-                "params": params,
-                "classes": classes,
-                "version": requested_version,
-            }
+            # Try V8 first, fall back to ResNet1D18
+            try:
+                model, params, classes, dec_cfg, rej_cfg = load_bearing_v8_model(artifact_path, expected)
+                bundle = {
+                    "model": model,
+                    "params": params,
+                    "classes": classes,
+                    "decision_config": dec_cfg,
+                    "rejection_config": rej_cfg,
+                    "version": requested_version,
+                    "engine": "v8",
+                }
+            except Exception:
+                model, params, classes = load_bearing_model(artifact_path, expected)
+                bundle = {
+                    "model": model,
+                    "params": params,
+                    "classes": classes,
+                    "version": requested_version,
+                    "engine": "resnet18",
+                }
         _model_bundle_cache[cache_key] = bundle
         while len(_model_bundle_cache) > MODEL_CACHE_SIZE:
             _model_bundle_cache.popitem(last=False)
@@ -844,6 +949,81 @@ def _diagnose_bearing(
         "mean_entropy": mean_entropy,
         "decision_reason": decision_reason,
         "class_names": classes,
+    }
+
+
+@torch.no_grad()
+def _diagnose_bearing_v8(
+    raw_signal: np.ndarray,
+    source_name: str = "",
+    bundle: Optional[Dict[str, Any]] = None,
+    rpm: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Bearing diagnosis using WDCNN-V8-DG with probability fusion + rejection."""
+    selected = bundle or _default_model_bundle("bearing", BEARING_V8_MODEL_VERSION)
+    model = selected["model"]
+    params = selected["params"]
+    classes = selected["classes"]
+    decision_cfg = selected.get("decision_config", {"mode": "probability_fusion", "binary_weight": 1.0})
+    rejection_cfg = selected.get("rejection_config", {})
+
+    sig = np.asarray(raw_signal, dtype=np.float32).reshape(-1)
+    win_len = int(params["win_len"])
+    stride = int(params.get("stride", win_len))
+    batch_size = int(params.get("batch_size", 32))
+    model_fs = float(params.get("fs", 16000.0))
+
+    # Determine RPM: explicit > file metadata default > 1500
+    effective_rpm = float(rpm) if rpm and rpm > 0 else 1500.0
+
+    result = v8_predict_signal(
+        model=model,
+        signal=sig,
+        rpm=effective_rpm,
+        device=DEVICE,
+        win_len=win_len,
+        stride=stride,
+        batch_size=batch_size,
+        decision_kwargs=decision_cfg,
+        input_fs=model_fs,
+        model_fs=model_fs,
+    )
+
+    result = v8_apply_rejection(result, rejection_cfg)
+
+    pred_idx = int(result["pred"])
+    prediction = classes[pred_idx] if pred_idx < len(classes) else "unknown"
+    confidence = float(result["confidence"])
+
+    # Map to status
+    if not result.get("accepted", True):
+        status = "UNCERTAIN"
+    elif prediction == "healthy":
+        status = "HEALTHY"
+    else:
+        status = "FAULT"
+
+    return {
+        "source_name": source_name,
+        "prediction_index": pred_idx,
+        "prediction": prediction,
+        "confidence": confidence,
+        "mean_probs": result["decision_scores"],
+        "direct_mean": result["direct_mean"],
+        "binary_mean": result["binary_mean"],
+        "segment_consistency": float(result["segment_consistency"]),
+        "num_segments": int(result["num_segments"]),
+        "mean_entropy": float(result.get("normalized_entropy", 0.0)),
+        "normalized_entropy": float(result.get("normalized_entropy", 0.0)),
+        "decision_reason": str(result["decision_reason"]),
+        "class_names": classes,
+        "status": status,
+        "accepted": result.get("accepted", True),
+        "rejection_reasons": result.get("rejection_reasons", []),
+        "head_agreement": result.get("head_agreement", True),
+        "vote_ratio": float(result.get("vote_ratio", 1.0)),
+        "input_fs": result.get("input_fs", model_fs),
+        "model_fs": result.get("model_fs", model_fs),
     }
 
 
@@ -1154,6 +1334,142 @@ def _build_bearing_frontend_payload(
     return data
 
 
+def _build_bearing_v8_frontend_payload(
+    v8_result: Dict[str, Any],
+    raw_signal: np.ndarray,
+    source_name: str,
+    sample_rate: float = 16000.0,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    sig = np.asarray(raw_signal, dtype=np.float64).reshape(-1)
+    n = sig.size
+    time_axis_full = np.arange(n, dtype=np.float64) / sample_rate if sample_rate > 0 else np.arange(n, dtype=np.float64)
+    time_axis, time_data = v6.downsample_curve(time_axis_full, sig, max_points=DISPLAY_POINTS)
+    spectrum = v6.compute_fft_full_curve(sig, fs=sample_rate, max_points=DISPLAY_SPECTRUM_POINTS, f_min=0.0)
+    metrics = v6.compute_industrial_metrics(sig, fs=sample_rate)
+
+    class_names = v8_result.get("class_names", bearing_v8_class_names)
+    prediction = str(v8_result["prediction"])
+    prediction_cn = BEARING_CLASS_CN_MAP.get(prediction, prediction)
+    confidence = float(v8_result["confidence"])
+    confidence_pct = round(float(np.clip(confidence * 100.0, CONFIDENCE_MIN, CONFIDENCE_MAX)), 2)
+    segment_consistency = float(v8_result["segment_consistency"])
+    mean_entropy = float(v8_result.get("normalized_entropy", v8_result.get("mean_entropy", 0.0)))
+    mean_probs = np.asarray(v8_result["mean_probs"], dtype=np.float64)
+
+    top_probs = [
+        {"class": cname, "probability": round(float(prob) * 100.0, 2)}
+        for cname, prob in zip(class_names, mean_probs)
+    ]
+    top_probs.sort(key=lambda x: x["probability"], reverse=True)
+
+    is_normal = prediction.lower() in ("healthy", "n", "normal")
+    status = v8_result.get("status", "FAULT" if not is_normal else "HEALTHY")
+    if status == "UNCERTAIN":
+        risk_level = "中"
+        alarm_level = "attention"
+    elif is_normal:
+        risk_level = "低"
+        alarm_level = "normal"
+    else:
+        risk_level = "高"
+        alarm_level = "alarm"
+    health_score = confidence * 100.0 if is_normal else max(0.0, 100.0 - confidence * 100.0)
+
+    accepted = v8_result.get("accepted", True)
+    rejection_reasons = v8_result.get("rejection_reasons", [])
+
+    evidence = [
+        {
+            "title": "模型类型",
+            "desc": f"轴承诊断模型 (WDCNN-V8-DG, {len(class_names)}类)",
+            "type": "info",
+            "level": "信息",
+        },
+        {
+            "title": "决策原因",
+            "desc": str(v8_result["decision_reason"]),
+            "type": "info",
+            "level": "信息",
+        },
+        {
+            "title": "片段一致性",
+            "desc": f"{segment_consistency:.4f}",
+            "type": "success" if segment_consistency > 0.8 else "warning",
+            "level": "高" if segment_consistency > 0.8 else "中",
+        },
+        {
+            "title": "Normalized entropy",
+            "desc": f"{mean_entropy:.4f}",
+            "type": "info",
+            "level": "信息",
+        },
+        {
+            "title": "Head agreement",
+            "desc": str(v8_result.get("head_agreement", True)),
+            "type": "success" if v8_result.get("head_agreement", True) else "warning",
+            "level": "高" if v8_result.get("head_agreement", True) else "低",
+        },
+    ]
+    if rejection_reasons:
+        evidence.append({
+            "title": "拒绝原因",
+            "desc": ", ".join(rejection_reasons),
+            "type": "warning",
+            "level": "高",
+        })
+
+    data: Dict[str, Any] = {
+        "label": prediction_cn,
+        "diagnosisResult": prediction_cn,
+        "diagnosisName": prediction_cn,
+        "confidence": confidence_pct,
+        "healthIndex": int(round(health_score)),
+        "riskLevel": risk_level,
+        "alarmLevel": alarm_level,
+        "diagnosisDetail": (
+            f"V8轴承诊断: {v8_result['decision_reason']} | "
+            f"预测:{prediction}({prediction_cn}) conf={confidence:.4f} | "
+            f"accepted={accepted}"
+        ),
+        "diagnosis_detail": f"V8轴承诊断: {v8_result['decision_reason']}",
+        "decision_reason": str(v8_result["decision_reason"]),
+        "closedPrediction": prediction,
+        "unknownRatio": 0.0,
+        "segmentConsistency": round(segment_consistency, 6),
+        "meanMahalanobis": 0.0,
+        "meanEntropy": round(mean_entropy, 6),
+        "normalizedEntropy": round(mean_entropy, 6),
+        "headAgreement": v8_result.get("head_agreement", True),
+        "source_name": source_name,
+        "sourceName": source_name,
+        "topProbabilities": top_probs[:len(class_names)],
+        "evidence": evidence,
+        "time_axis": time_axis,
+        "time_data": time_data,
+        "waveform": time_data,
+        "freq_axis": spectrum["freq_hz"],
+        "frequencyAxis": spectrum["freq_hz"],
+        "freq_data": spectrum["amplitude"],
+        "spectrum": spectrum["amplitude"],
+        "rms": round(v6.safe_float(metrics["rms"]), 6),
+        "latestRms": round(v6.safe_float(metrics["rms"]), 6),
+        "peak": round(v6.safe_float(metrics["peak"]), 6),
+        "latestPeak": round(v6.safe_float(metrics["peak"]), 6),
+        "sample_rate": sample_rate,
+        "sampleRate": sample_rate,
+        "count": len(time_data),
+        "analysis_mode": "bearing_wdcnn_v8",
+        "modelType": "bearing",
+        "modelVersion": "WDCNN-V8-DG",
+        "numSegments": int(v8_result["num_segments"]),
+    }
+
+    if extra:
+        data.update(extra)
+    return data
+
+
 def _run_analysis(
     model_type: str,
     raw_signal: np.ndarray,
@@ -1188,6 +1504,18 @@ def _run_analysis(
 
         fs = float(extra_payload.get("sample_rate") or extra_payload.get("sampleRate")
                    or params.get("fs", 16000.0))
+        engine = selected.get("engine", "resnet18")
+        if engine == "v8":
+            # Extract RPM from extra payload or use default
+            rpm = extra_payload.get("rpm") or extra_payload.get("sampleRpm")
+            bearing_result = _diagnose_bearing_v8(
+                raw_signal, source_name=source_name, bundle=selected, rpm=rpm,
+            )
+            extra_payload["analysis_mode"] = mode
+            return _build_bearing_v8_frontend_payload(
+                bearing_result, raw_signal, source_name,
+                sample_rate=fs, extra=extra_payload,
+            )
         bearing_result = _diagnose_bearing(raw_signal, source_name=source_name, bundle=selected)
         extra_payload["analysis_mode"] = mode
         return _build_bearing_frontend_payload(
@@ -1203,27 +1531,31 @@ def _build_health_payload() -> Dict[str, Any]:
     loaded_count = sum(int(model in ENABLED_MODELS and globals().get(f"{model}_model") is not None)
                        for model in VALID_MODEL_TYPES)
     expected_count = len(ENABLED_MODELS)
+    bearing_any_loaded = bearing_v8_model is not None or bearing_model is not None
     return {
         "status": "ok" if loaded_count == expected_count else ("degraded" if loaded_count else "unavailable"),
         "device": str(DEVICE),
         "model_loaded": loaded_count == expected_count,
         "gear_model_loaded": gear_model is not None,
-        "bearing_model_loaded": bearing_model is not None,
+        "bearing_model_loaded": bearing_any_loaded,
+        "bearing_v8_model_loaded": bearing_v8_model is not None,
         "gear_model_version": GEAR_MODEL_VERSION,
-        "bearing_model_version": BEARING_MODEL_VERSION,
+        "bearing_model_version": BEARING_V8_MODEL_VERSION if bearing_v8_model is not None else BEARING_MODEL_VERSION,
+        "bearing_v8_model_version": BEARING_V8_MODEL_VERSION,
         "model_path": str(GEAR_MODEL_PATH),
         "gear_model_path": str(GEAR_MODEL_PATH),
-        "bearing_model_path": str(BEARING_MODEL_PATH),
-        "version": "v2_dual_model",
+        "bearing_model_path": str(BEARING_V8_MODEL_PATH),
+        "bearing_v8_model_path": str(BEARING_V8_MODEL_PATH),
+        "version": "v2_bearing_v8",
         "classes": gear_class_names,
         "gear_classes": gear_class_names,
-        "bearing_classes": bearing_class_names,
-        "bearing_classes_cn": [BEARING_CLASS_CN_MAP.get(c, c) for c in bearing_class_names],
+        "bearing_classes": bearing_v8_class_names or bearing_class_names,
+        "bearing_classes_cn": [BEARING_CLASS_CN_MAP.get(c, c) for c in (bearing_v8_class_names or bearing_class_names)],
         "win_len": gear_model_params.get("win_len"),
         "stride": gear_model_params.get("stride"),
         "fs": gear_model_params.get("fs"),
         "gear_params": gear_model_params,
-        "bearing_params": bearing_model_params,
+        "bearing_params": bearing_v8_params or bearing_model_params,
         "model_errors": dict(model_load_errors),
         "batch_endpoint": True,
         "workers": INFERENCE_WORKERS,
@@ -1317,6 +1649,15 @@ def infer(payload: Dict[str, Any]) -> Dict[str, Any]:
         if file_meta.get("sample_rate"):
             extra["sample_rate"] = float(file_meta["sample_rate"])
             extra["sampleRate"] = float(file_meta["sample_rate"])
+        # RPM: payload > file metadata > None (V8 model will use default 1500)
+        rpm_value = payload.get("rpm") or payload.get("sampleRpm")
+        if rpm_value is not None:
+            try:
+                extra["rpm"] = float(rpm_value)
+            except (TypeError, ValueError):
+                pass
+        if "rpm" not in extra and file_meta.get("rpm"):
+            extra["rpm"] = float(file_meta["rpm"])
         return _run_analysis(
             model_type,
             raw_signal,
