@@ -29,16 +29,25 @@ public class V2026081705__PhmAlarmSource extends BaseJavaMigration
             try (Statement statement = connection.createStatement())
             {
                 statement.execute("ALTER TABLE phm_alarm_event "
-                    + "ADD COLUMN alarm_source VARCHAR(16) NOT NULL DEFAULT 'BUSINESS' "
+                    + "ADD COLUMN alarm_source VARCHAR(16) NULL "
                     + "COMMENT 'BUSINESS/MODEL' AFTER alarm_type");
             }
         }
         try (PreparedStatement statement = connection.prepareStatement(
             "UPDATE phm_alarm_event SET alarm_source = "
             + "CASE WHEN LOWER(alarm_type) = 'diagnosis' THEN 'MODEL' ELSE 'BUSINESS' END "
-            + "WHERE alarm_source IS NULL OR alarm_source NOT IN ('BUSINESS','MODEL')"))
+            + "WHERE alarm_source IS NULL"))
         {
             statement.executeUpdate();
+        }
+        if (!columnNotNullOrDefault(connection, "phm_alarm_event", "alarm_source"))
+        {
+            try (Statement statement = connection.createStatement())
+            {
+                statement.execute("ALTER TABLE phm_alarm_event "
+                    + "MODIFY alarm_source VARCHAR(16) NOT NULL DEFAULT 'BUSINESS' "
+                    + "COMMENT 'BUSINESS/MODEL' AFTER alarm_type");
+            }
         }
         if (!indexExists(connection, "phm_alarm_event", "idx_phm_alarm_source_status_time"))
         {
@@ -62,6 +71,22 @@ public class V2026081705__PhmAlarmSource extends BaseJavaMigration
     {
         try (PreparedStatement statement = connection.prepareStatement(
             "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_name=?"))
+        {
+            statement.setString(1, connection.getCatalog());
+            statement.setString(2, tableName);
+            statement.setString(3, columnName);
+            try (ResultSet rows = statement.executeQuery())
+            {
+                return rows.next();
+            }
+        }
+    }
+
+    private boolean columnNotNullOrDefault(Connection connection, String tableName, String columnName) throws Exception
+    {
+        try (PreparedStatement statement = connection.prepareStatement(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name=? "
+            + "AND column_name=? AND is_nullable='NO' AND column_default IS NOT NULL"))
         {
             statement.setString(1, connection.getCatalog());
             statement.setString(2, tableName);

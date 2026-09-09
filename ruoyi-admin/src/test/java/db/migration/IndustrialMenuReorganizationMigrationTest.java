@@ -49,6 +49,8 @@ class IndustrialMenuReorganizationMigrationTest
 
         Flyway flyway = Flyway.configure()
             .dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())
+            .locations("classpath:db/migration-targeted")
+            .failOnMissingLocations(false)
             .baselineOnMigrate(true).baselineVersion("2026081700")
             .javaMigrations(new V2026081701__ReorganizeIndustrialMenus()).load();
         assertEquals(1, flyway.migrate().migrationsExecuted);

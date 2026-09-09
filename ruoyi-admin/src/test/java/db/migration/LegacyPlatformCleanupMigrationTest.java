@@ -36,6 +36,8 @@ class LegacyPlatformCleanupMigrationTest
         }
 
         Flyway.configure().dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())
+            .locations("classpath:db/migration-targeted")
+            .failOnMissingLocations(false)
             .baselineOnMigrate(true).baselineVersion("2026081500")
             .javaMigrations(new V2026081601__RemoveLegacyPlatformComponents()).load().migrate();
 

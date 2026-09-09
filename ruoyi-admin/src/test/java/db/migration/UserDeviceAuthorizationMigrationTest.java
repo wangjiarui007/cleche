@@ -34,6 +34,8 @@ class UserDeviceAuthorizationMigrationTest
 
         Flyway flyway = Flyway.configure()
             .dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())
+            .locations("classpath:db/migration-targeted")
+            .failOnMissingLocations(false)
             .baselineOnMigrate(true).baselineVersion("2026081703")
             .javaMigrations(new V2026081704__UserDeviceAuthorization()).load();
         assertEquals(1, flyway.migrate().migrationsExecuted);

@@ -126,16 +126,25 @@ public class ProductionConfigurationValidator implements ApplicationRunner
             errors.add(key + " must be configured");
             return;
         }
+        if (!isAbsolutePath(value))
+        {
+            errors.add(key + " must be an absolute path");
+        }
+    }
+
+    private static boolean isAbsolutePath(String value)
+    {
         try
         {
-            if (!Path.of(value).isAbsolute())
+            if (Path.of(value).isAbsolute())
             {
-                errors.add(key + " must be an absolute path");
+                return true;
             }
+            return value.matches("^[A-Za-z]:[/\\\\].*");
         }
         catch (Exception ex)
         {
-            errors.add(key + " is not a valid filesystem path");
+            return false;
         }
     }
 

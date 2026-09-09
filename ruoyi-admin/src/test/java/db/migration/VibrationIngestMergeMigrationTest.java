@@ -46,6 +46,8 @@ class VibrationIngestMergeMigrationTest
 
         Flyway flyway = Flyway.configure()
             .dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())
+            .locations("classpath:db/migration-targeted")
+            .failOnMissingLocations(false)
             .baselineOnMigrate(true).baselineVersion("2026081705")
             .javaMigrations(new V2026081706__MergeVibrationIngestIntoAnalysis()).load();
         assertEquals(1, flyway.migrate().migrationsExecuted);
